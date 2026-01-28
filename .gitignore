@@ -1,0 +1,15 @@
+# User Data
+database/
+.env
+
+# System & IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
