@@ -71,7 +71,7 @@ def save_questions_csv(questions: List[Dict], output_path: Path):
     fieldnames = ["Question", "Ground Truth", "Reference Document", "Page", "Checklist"]
     
     try:
-        with open(output_path, "w", newline='', encoding='utf-8') as f:
+        with open(output_path, "w", newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(questions)
@@ -160,29 +160,36 @@ def _process_single_pdf(pdf_path: Path, database_dir: str, models: Dict[str, Any
     print("  Generating and saving questions...")
     all_questions = []
 
-    # Calculate relative path for reference
-    # database_dir is passed as string, convert to Path to be safe, though usage suggests string in caller
-    # We need to compute relative path from the 'database' root.
-    # The analyzer is called with database_dir.
-    try:
-        # Assuming database_dir is the root of the database
-        # If pdf_path is /abs/path/to/database/subdir/file.pdf, and database_dir is /abs/path/to/database
-        # relative_path would be subdir/file.pdf
-        # Note: database_dir might be relative like "database", so we resolve both to be safe
-        db_path_obj = Path(database_dir).resolve()
-        pdf_path_obj = pdf_path.resolve()
-        relative_pdf_path = str(pdf_path_obj.relative_to(db_path_obj))
-    except ValueError:
-        # Fallback if not relative (e.g. if files are outside database dir for some reason)
-        relative_pdf_path = pdf_path.name
-    
     # Collect single page questions
+    page_to_md_path = {}
+    
     for page_num, data in page_data.items():
+        cat_name = page_to_category.get(page_num, "Uncategorized")
+        
+        # Construct markdown filename and path
+        md_filename = f"page_{page_num:03}.md"
+        # base_output_dir is where we are strictly saving the file. 
+        # It is usually relative if database_dir was relative.
+        saved_md_path = base_output_dir / cat_name / md_filename
+        
+        # Ensure path format starts with database/ or relative from project root
+        # If saved_md_path is absolute, try to make it relative to CWD.
+        try:
+             if saved_md_path.is_absolute():
+                 ref_path = str(saved_md_path.relative_to(Path.cwd()))
+             else:
+                 ref_path = str(saved_md_path)
+        except ValueError:
+             # Fallback if cannot make relative (e.g. outside CWD)
+             ref_path = str(saved_md_path)
+
+        page_to_md_path[page_num] = ref_path
+
         for q in data["questions"]:
             all_questions.append({
                 "Question": q["question"],
                 "Ground Truth": q["answer"],
-                "Reference Document": relative_pdf_path,
+                "Reference Document": ref_path,
                 "Page": str(page_num),
                 "Checklist": "\n".join([f"・{item}" for item in q.get("checklist", [])])
             })
@@ -193,10 +200,18 @@ def _process_single_pdf(pdf_path: Path, database_dir: str, models: Dict[str, Any
     multi_questions = generate_multipage_questions(summaries, models["summary"])
     
     for q in multi_questions:
+        refs = []
+        for p_num in q.get("reference_pages", []):
+             if p_num in page_to_md_path:
+                 refs.append(page_to_md_path[p_num])
+        
+        # Join multiple references with newline
+        ref_str = "\n".join(refs)
+
         all_questions.append({
             "Question": q["question"],
             "Ground Truth": q["answer"],
-            "Reference Document": relative_pdf_path,
+            "Reference Document": ref_str,
             "Page": ",".join(map(str, q.get("reference_pages", []))),
             "Checklist": "\n".join([f"・{item}" for item in q.get("checklist", [])])
         })
