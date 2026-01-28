@@ -24,6 +24,8 @@ MULTIPAGE_QUESTION_PROMPT = """
 
 - 最低3つ、最大10個作成してください。
 - 各質問には、回答の根拠となる「参照ページ番号（複数）」を明記してください。
+- 各質問に対して、正解とみなすための重要な要素を箇条書きにした「チェックリスト」を作成してください。
+- 回答は、決して参考文献の内容に脚色をつけないでください。提供された要約の情報のみに基づいて作成してください。
 
 出力形式 (JSON):
 {
@@ -31,7 +33,11 @@ MULTIPAGE_QUESTION_PROMPT = """
     {
       "question": "質問文...",
       "answer": "回答文...",
-      "reference_pages": [1, 5, 10]
+      "reference_pages": [1, 5, 10],
+      "checklist": [
+        "チェック項目1",
+        "チェック項目2"
+      ]
     }
   ]
 }
@@ -62,7 +68,7 @@ def save_questions_csv(questions: List[Dict], output_path: Path):
     if not questions:
         return
     
-    fieldnames = ["Question", "Ground Truth", "Reference Document", "Page"]
+    fieldnames = ["Question", "Ground Truth", "Reference Document", "Page", "Checklist"]
     
     try:
         with open(output_path, "w", newline='', encoding='utf-8') as f:
@@ -177,7 +183,8 @@ def _process_single_pdf(pdf_path: Path, database_dir: str, models: Dict[str, Any
                 "Question": q["question"],
                 "Ground Truth": q["answer"],
                 "Reference Document": relative_pdf_path,
-                "Page": str(page_num)
+                "Page": str(page_num),
+                "Checklist": "\n".join([f"・{item}" for item in q.get("checklist", [])])
             })
             
     # Generate multi-page questions
@@ -190,7 +197,8 @@ def _process_single_pdf(pdf_path: Path, database_dir: str, models: Dict[str, Any
             "Question": q["question"],
             "Ground Truth": q["answer"],
             "Reference Document": relative_pdf_path,
-            "Page": ",".join(map(str, q.get("reference_pages", [])))
+            "Page": ",".join(map(str, q.get("reference_pages", []))),
+            "Checklist": "\n".join([f"・{item}" for item in q.get("checklist", [])])
         })
         
     # Save to CSV

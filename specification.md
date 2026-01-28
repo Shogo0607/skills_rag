@@ -1,71 +1,16 @@
-# RAG Agent Skill Specification
+# Specification
 
-## 概要
-ユーザーの質問に対し、ローカルの `database` ディレクトリ内のドキュメントを参照して回答する Agent Skill。
+## Question Generation
+- When analyzing PDFs, the system generates "Anticipated Questions".
+- Each question must include:
+    - Question text
+    - Ground Truth (Answer)
+    - Reference Document (Path)
+    - Page Number(s)
+    - **Checklist** (Evaluation Criteria)
+        - A list of key points that must be included in the answer to be considered correct.
+        - Format: Bulleted list or newlines in the CSV cell.
 
-## 機能要件
-1. **質問受付**: ユーザーからの自然言語による質問を受け付ける。
-2. **構造把握**: `database` フォルダ以下の全ファイル構造を取得する。
-3. **自律的探索ループ**:
-    - ファイルリストと現状のコンテキストに基づき、Agentが自律的に「次に読むべきファイル」または「回答生成」を判断する。
-    - 情報が不十分な場合は、再度別のファイルを指定して読み込みを行う（最大5回程度）。
-4. **データ読み込み**:
-    - `skills/rag/scripts/read_data.py` を使用して内容を読み込む。
-5. **回答生成**: 十分な情報が集まった、またはループ上限に達した場合、最終的な回答を生成する。
-
-## 処理フロー
-1. Agentが質問を受信。
-2. `database` ディレクトリのファイルリストを取得。
-3. **探索ループ開始**:
-    a. Agentが現在の知識（コンテキスト）とファイルリストから、次の行動（ファイルを読む OR 回答する）を決定。
-    b. **ファイルを読む**場合: 指定ファイルを読み込み、コンテキストに追加してループ継続。
-    c. **回答する**場合: 回答を生成してループ終了。
-4. 最終回答を出力。
-
-## 技術スタック
-- **Agent Framework**: (Internal Agent System) -> **Python Script**
-- **Language**: Python (for data reading scripts)
-- **Library**: `openai`, `pandas`
-- **Model**: `gpt-5-codex`
-
-## 新規スクリプト仕様: `skills/rag/scripts/rag_agent.py`
-OpenAI SDKを使用して、上記のプロセスを自動化するPythonスクリプト。
-1. **引数**: 質問文
-2. **Step 1**: `database` 以下のファイル一覧取得
-3. **Step 2**: LLMによる関連ファイル選定
-4. **Step 3**: `read_data.py` によるファイル読み込み
-5. **Step 4**: LLMによる回答生成
-6. **出力**: 標準出力に回答を表示
-
-- 2026-01-28: `rag_agent.py` における `read_data` モジュールの参照エラーを修正（`read_file` 直接呼び出しに変更）。
-- 2026-01-28: `rag_agent.py` 起動時に未処理のPDFを自動分析・構造化する機能を追加。
-- 2026-01-28: `rag_agent.py` 内のプロンプトを日本語化。
-
-## PDF自動分析機能（新規追加）
-`rag_agent.py` 起動時に以下の処理を自動実行する。
-1.  **対象検出**: `database` フォルダ内のPDFのうち、ファイル名末尾が `_analyzed` でないものを対象とする。
-2.  **画像化**: PDFを1ページずつ画像に変換する。
-3.  **マークダウン化**: 画像をAIモデル（GPT-4o等）に入力し、テキスト・図表を含むMarkdownを作成する。
-4.  **要約**: 各ページのMarkdownから要約を作成する。
-5.  **カテゴリ分け**: 全ページの要約をもとに、ページをカテゴリに分類する。
-6.  **フォルダ整理**:
-    - PDFと同じ階層にフォルダを作成（PDF名に基づく）。
-    - 作成したカテゴリフォルダにMarkdownファイルを分配する。
-    - 処理完了後、元のPDFファイル名を `[OriginalName]_analyzed.pdf` に変更する。
-7.  **モジュール構成**: 機能ごとにファイルを分割する（`pdf_analysis` パッケージ等）。
-8.  **パフォーマンス**: 処理の高速化のため、LangChainのbatch機能等を用いて最大100並列で分析を実行する。
-9.  **設定の一元化**: LLMモデルの定義は `rag_agent.py` で行い、PDF分析モジュールには引数として渡す構成とする。
-10. **想定質問作成**:
-    - 各ページについて、内容量に応じて最低5つの想定質問（質問・回答ペア）を作成する。
-    - 複数ページを参照しないと回答できない「複合質問」も作成する。
-    - すべての想定質問を `想定質問` フォルダ内の `想定質問.csv` に保存する（カラム: 質問, 想定回答, 参照ファイルパス, ページ番号）。
-    - 参照ファイルパスは、`database` ディレクトリからの相対パス（例: `冷蔵庫/my_fridge.pdf`）を記述する。
-
-## 構成管理
-- **.gitignore**: セキュリティとリポジトリの軽量化のため、以下のディレクトリ・ファイルを除外する。
-    - `database/` (ドキュメント格納用)
-    - `.env` (環境変数)
-    - `__pycache__/` (Pythonキャッシュ)
-    - `.DS_Store` (macOS用)
-    - `.venv/` (仮想環境)
-    - その他一時ファイル
+## Output Format
+- `database/subdirectory/想定質問/想定質問.csv`
+- Columns: `Question`, `Ground Truth`, `Reference Document`, `Page`, `Checklist`

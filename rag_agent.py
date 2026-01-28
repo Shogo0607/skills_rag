@@ -88,7 +88,18 @@ def main():
         
     question = sys.argv[1]
     
-    database_dir = "database"
+    # デフォルトのデータベースディレクトリ
+    base_database_dir = "database"
+    
+    # サブディレクトリが指定されている場合
+    if len(sys.argv) > 2:
+        target_subdir = sys.argv[2]
+        database_dir = os.path.join(base_database_dir, target_subdir)
+        print(f"Targeting subdirectory: {database_dir}")
+    else:
+        database_dir = base_database_dir
+        print(f"Targeting root directory: {database_dir}")
+
     if not os.path.exists(database_dir):
         print(f"Error: Directory '{database_dir}' not found.")
         sys.exit(1)
