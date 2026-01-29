@@ -15,36 +15,47 @@ This skill allows the agent to answer questions by retrieving information from f
 
 ## Instructions
 
-When the user asks a question that requires external knowledge from the `database` folder, follow these steps:
+When the user asks a question that requires external knowledge from the `database` folder, or asks to perform analysis on PDF files, follow these steps.
 
-1.  **Analyze the Request**: Identify the core question.
+### 1. Identify the Mode
 
-2.  **Explore Database Structure**:
-    -   Run the following command to get the full file tree of the `database` directory:
-        ```bash
-        find database -maxdepth 5 -not -path '*/.*'
-        ```
-    -   *Note*: Ensure you are in the project root or adjust the path accordingly.
+Determine if the user wants to:
+-   **Analyze PDFs**: Run the agent to scan for new PDFs.
+-   **Ask a Question**: Get an answer based on existing documents.
+-   **Process a Batch**: Run multiple questions from a CSV file.
 
-3.  **Identify Candidates**:
-    -   Review the file list from Step 2.
-    -   Select files that are likely to contain information relevant to the user's question.
-    -   List these candidate files in your thought process.
+### 2. Execution
 
-4.  **Read File Content**:
-    -   For **EACH** candidate file identified in Step 3, you **MUST** use the provided Python script to read its content.
-    -   Run the following command for each file:
-        ```bash
-        python3 skills/rag/scripts/read_data.py <path_to_file>
-        ```
-    -   *Note*: The script automatically handles `.csv` (using pandas/csv) and `.md`/`.txt` (text read).
+Use the `skills.rag.rag_agent` module.
 
-5.  **Generate Answer**:
-    -   Synthesize the information read from the files.
-    -   Answer the user's question based *only* on the retrieved information.
-    -   If the information is insufficient, state what is missing or perform a broader search if applicable (repeat from Step 2 with different keywords if possible, though usually file names are key).
+#### Case A: PDF Analysis / General Startup
+To simply run PDF analysis (and check for unanalyzed files):
+```bash
+python -m skills.rag.rag_agent "help"
+```
+*(The agent always runs PDF analysis on startup. Using "help" or no arguments will show usage but trigger analysis first.)*
 
-## Dependencies
+#### Case B: Single Question RAG
+To answer a specific question using the database:
+```bash
+python -m skills.rag.rag_agent "ここに質問内容を記述"
+```
+-   **Context**: The agent will search `database` for relevant files, read them, and generate an answer.
+-   **Output**: The answer will be printed to stdout.
+
+#### Case C: Batch Processing
+To process a list of questions from a CSV file:
+```bash
+python -m skills.rag.rag_agent "path/to/input.csv"
+```
+-   **Input CSV Format**:
+    -   Header: `Question` (Required)
+    -   Optional: `Ground Truth`, `Reference Document`, `Checklist` (for evaluation)
+-   **Output**: A new CSV file `original_name_results.csv` will be created with answers and metrics.
+
+### 3. Dependencies
 -   `python3`
--   `pandas` (optional, for better CSV formatting)
--   `skills/rag/scripts/read_data.py` (must exist)
+-   `openai`
+-   `langchain`
+-   `skills/rag/rag_agent.py` (Main entry point)
+
