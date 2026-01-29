@@ -12,6 +12,7 @@ from skills.rag.scripts.read_data import read_file
 from skills.rag.pdf_analysis.analyzer import analyze_new_pdfs
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from skills.rag.optimization.folder_optimizer import FolderOptimizer
 
 load_dotenv()
 
@@ -175,15 +176,15 @@ class Evaluator:
         )
         self.model_name = model_name
 
-    def evaluate_checklist(self, checklist_text: str, answer_text: str) -> Tuple[float, float, str]:
+    def evaluate_checklist(self, checklist_text: str, answer_text: str) -> Tuple[float, float, str, int, int, int]:
         """
         Evaluates the answer against the checklist.
-        Returns: (recall, precision, reason)
+        Returns: (recall, precision, reason, tp, fp, fn)
         Recall: % of checklist items found in answer.
         Precision: % of key points in answer that match checklist (approx).
         """
         if not checklist_text or not checklist_text.strip():
-            return 0.0, 0.0, "No checklist provided"
+            return 0.0, 0.0, "No checklist provided", 0, 0, 0
 
         prompt = f"""
         あなたは回答の品質評価者です。
@@ -192,6 +193,11 @@ class Evaluator:
         1. Checklist Recall (再現率): チェックリストの項目が、回答の中にどれだけ含まれているか (0.0 - 1.0)
         2. Checklist Precision (適合率): 回答に含まれる主要な主張のうち、チェックリストの項目と一致する割合 (0.0 - 1.0)
            ※ ここでは簡易的に、「回答の主要ポイント」を抽出し、そのうちチェックリストにあるものの割合とします。
+        
+        また、以下のカウントも行ってください:
+        - TP (True Positive): 回答に含まれていたチェックリスト項目の数
+        - FP (False Positive): チェックリストに含まれていないが、回答に含まれている主要なポイントの数
+        - FN (False Negative): 回答に含まれていなかったチェックリスト項目の数
         
         チェックリスト:
         {checklist_text}
@@ -203,6 +209,9 @@ class Evaluator:
         {{
             "recall": 0.8,
             "precision": 0.7,
+            "tp": 4,
+            "fp": 1,
+            "fn": 1,
             "reason": "チェックリストの項目XとYは含まれていたが、Zは欠落していた。回答には独自の情報Aが含まれていたためPrecisionが下がった。"
         }}
         """
@@ -213,72 +222,88 @@ class Evaluator:
                 response_format={"type": "json_object"}
             )
             data = json.loads(response.choices[0].message.content)
-            return data.get("recall", 0.0), data.get("precision", 0.0), data.get("reason", "")
+            return (
+                data.get("recall", 0.0),
+                data.get("precision", 0.0),
+                data.get("reason", ""),
+                data.get("tp", 0),
+                data.get("fp", 0),
+                data.get("fn", 0)
+            )
         except Exception as e:
             print(f"Error in evaluate_checklist: {e}")
-            return 0.0, 0.0, f"Error: {e}"
+            return 0.0, 0.0, f"Error: {e}", 0, 0, 0
 
-    def evaluate_references(self, gt_ref: str, gt_page: str, retrieved_files: List[str]) -> Tuple[float, float]:
+    def evaluate_references(self, gt_ref: str, gt_page: str, retrieved_files: List[str], all_files: List[str]) -> Tuple[float, float, float, int, int, int, int]:
         """
         Evaluates if retrieved files match ground truth.
-        GT Ref: "database/path/to/page_XXX.md" (can be multiple, newline separated)
-        GT Page: "1" (legacy, used if needed, but GT Ref should be authoritative now)
+        GT Ref: "path/to/page_XXX.md" (can be multiple, newline separated, and using '|' for aliases)
+        GT Page: "1" (legacy)
         Retrieved: List of file paths read by the agent.
+        all_files: List of all files in the database (for TN calculation).
         
-        Returns: (recall, precision)
+        Returns: (recall, precision, specificity, tp, tn, fp, fn)
         """
         if not gt_ref:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0, 0, 0, 0
             
-        # Parse GT references (handle multiple lines)
-        gt_targets = set()
-        for ref in gt_ref.split('\n'):
-             ref = ref.strip()
-             if ref:
-                 gt_targets.add(ref)
+        # Parse GT references
+        # Each "target" can be a set of aliases
+        gt_targets = [] # List of sets
+        for line in gt_ref.split('\n'):
+             line = line.strip()
+             if line:
+                 aliases = set(a.strip() for a in line.split('|') if a.strip())
+                 if aliases:
+                     gt_targets.append(aliases)
         
-        if not gt_targets:
-            return 0.0, 0.0
-
-        # Create a set of retrieved files for easier checking
         retrieved_set = set(retrieved_files)
         
-        # Calculate Recall: How many GT targets were found?
-        matches = 0
-        for target in gt_targets:
-             # Check if target is in retrieved_set
-             # Allow for absolute/relative differences by checking suffix
-             found = False
-             for r in retrieved_set:
-                 # Check if strings match or one ends with the other (to handle relative vs absolute)
-                 # Target: database/.../page_008.md
-                 # Retrieved: /abs/path/database/.../page_008.md OR database/.../page_008.md
-                 if r.endswith(target) or target.endswith(r):
-                     found = True
-                     break
-             if found:
-                 matches += 1
-                 
-        recall = matches / len(gt_targets) if gt_targets else 0.0
+        # Helper to check if a retrieved file matches ANY alias in a target set
+        def matches_any_alias(retrieved_path, alias_set):
+            for alias in alias_set:
+                if retrieved_path.endswith(alias) or alias.endswith(retrieved_path):
+                    return True
+            return False
+
+        # Helper to check if a target set is satisfied by ANY retrieved file
+        def is_target_satisfied(alias_set, retrieved_files_set):
+            for r in retrieved_files_set:
+                if matches_any_alias(r, alias_set):
+                    return True
+            return False
+
+        # TP: Number of GT targets that were satisfied
+        tp = 0
+        for target_aliases in gt_targets:
+            if is_target_satisfied(target_aliases, retrieved_set):
+                tp += 1
+                
+        # FN: Number of GT targets NOT satisfied
+        fn = len(gt_targets) - tp
         
-        # Calculate Precision: How many retrieved files were relevant?
-        # Only count files that match at least one GT target.
-        relevant_retrieved = 0
-        if retrieved_set:
-            for r in retrieved_set:
-                 is_relevant = False
-                 for target in gt_targets:
-                     if r.endswith(target) or target.endswith(r):
-                         is_relevant = True
-                         break
-                 if is_relevant:
-                     relevant_retrieved += 1
+        # FP: Retrieved files that didn't match ANY target
+        # Be careful: A retrieved file might match Target A. It shouldn't be FP.
+        fp = 0
+        for r in retrieved_set:
+            matched_something = False
+            for target_aliases in gt_targets:
+                if matches_any_alias(r, target_aliases):
+                    matched_something = True
+                    break
+            if not matched_something:
+                fp += 1
+        
+        # TN = Total Files - (TP + FP + FN) 
+        # Note: This is a rough estimation for "Document Retrieval" TN.
+        total_files = len(all_files) if all_files else 0
+        tn = max(0, total_files - (tp + fp + fn))
+
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
             
-            precision = relevant_retrieved / len(retrieved_set)
-        else:
-            precision = 0.0
-            
-        return recall, precision
+        return recall, precision, specificity, tp, tn, fp, fn
 
 def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir: str, all_files: List[str], evaluator: Evaluator, has_ground_truth: bool) -> Tuple[int, Dict[str, Any]]:
     question = row.get("Question")
@@ -302,18 +327,40 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
         gt_page = row.get("Page", "")
         
         # Evaluate Checklist
-        c_recall, c_precision, c_reason = evaluator.evaluate_checklist(checklist, answer)
+        c_recall, c_precision, c_reason, c_tp, c_fp, c_fn = evaluator.evaluate_checklist(checklist, answer)
         result_row["Checklist Recall"] = c_recall
         result_row["Checklist Precision"] = c_precision
+        result_row["Checklist TP"] = c_tp
+        result_row["Checklist FP"] = c_fp
+        result_row["Checklist FN"] = c_fn
         result_row["Evaluation Reason"] = c_reason
         
         # Evaluate References
-        r_recall, r_precision = evaluator.evaluate_references(gt_ref, gt_page, history)
+        r_recall, r_precision, r_specificity, r_tp, r_tn, r_fp, r_fn = evaluator.evaluate_references(gt_ref, gt_page, history, all_files)
         result_row["Ref Recall"] = r_recall
         result_row["Ref Precision"] = r_precision
+        result_row["Ref Specificity"] = r_specificity
+        result_row["Ref TP"] = r_tp
+        result_row["Ref TN"] = r_tn
+        result_row["Ref FP"] = r_fp
+        result_row["Ref FN"] = r_fn
         
-        # Simple logging of results (might overlap in output)
-        print(f"[{index+1}] C-Rec: {c_recall:.2f}, C-Prec: {c_precision:.2f} | R-Rec: {r_recall:.2f}, R-Prec: {r_precision:.2f}")
+        # Evaluate Optimized References if present
+        opt_ref = row.get("Optimized Reference Document", "")
+        if opt_ref:
+            or_recall, or_precision, or_specificity, or_tp, or_tn, or_fp, or_fn = evaluator.evaluate_references(opt_ref, gt_page, history, all_files)
+            result_row["Opt Ref Recall"] = or_recall
+            result_row["Opt Ref Precision"] = or_precision
+            result_row["Opt Ref Specificity"] = or_specificity
+            result_row["Opt Ref TP"] = or_tp
+            result_row["Opt Ref TN"] = or_tn
+            result_row["Opt Ref FP"] = or_fp
+            result_row["Opt Ref FN"] = or_fn
+            
+            print(f"[{index+1}] Checklist(R/P): {c_recall:.2f}/{c_precision:.2f} | Ref(R/P/S): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f} | OptRef(R/P/S): {or_recall:.2f}/{or_precision:.2f}/{or_specificity:.2f}")
+        else:
+            # Simple logging of results (might overlap in output)
+            print(f"[{index+1}] Checklist(R/P): {c_recall:.2f}/{c_precision:.2f} | Ref(R/P/S): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}")
     
     return index, result_row
 
@@ -365,7 +412,15 @@ def process_batch_csv(csv_path: str, database_dir: str):
     # Determine new headers
     output_headers = list(rows[0].keys()) + ["RAG Answer", "Retrieved Files"]
     if has_ground_truth:
-        output_headers += ["Checklist Recall", "Checklist Precision", "Evaluation Reason", "Ref Recall", "Ref Precision"]
+        if "Optimized Reference Document" in rows[0]:
+             output_headers += [
+                "Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref TP", "Opt Ref TN", "Opt Ref FP", "Opt Ref FN"
+             ]
+        
+        output_headers += [
+            "Checklist Recall", "Checklist Precision", "Checklist TP", "Checklist FP", "Checklist FN", "Evaluation Reason",
+            "Ref Recall", "Ref Precision", "Ref Specificity", "Ref TP", "Ref TN", "Ref FP", "Ref FN"
+        ]
         
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=output_headers)
@@ -373,6 +428,14 @@ def process_batch_csv(csv_path: str, database_dir: str):
         writer.writerows(final_rows)
         
     print(f"\nBatch processing complete. Results saved to: {output_path}")
+
+    # Run Folder Optimization if Ground Truth was present
+    if has_ground_truth:
+        try:
+            optimizer = FolderOptimizer(database_dir)
+            optimizer.run(output_path, csv_path)
+        except Exception as e:
+            print(f"Warning: Folder optimization failed: {e}")
 
 def main():
     if len(sys.argv) < 2:
