@@ -4,6 +4,7 @@ import openai
 import json
 import csv
 import re
+import concurrent.futures
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
 
@@ -279,6 +280,43 @@ class Evaluator:
             
         return recall, precision
 
+def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir: str, all_files: List[str], evaluator: Evaluator, has_ground_truth: bool) -> Tuple[int, Dict[str, Any]]:
+    question = row.get("Question")
+    if not question:
+        return index, None
+        
+    print(f"Processing {index+1}/{total} (Thread): {question[:30]}...")
+    
+    # Run RAG (verbose=False to avoid log interleaving)
+    rag_result = run_rag_session(question, database_dir, all_files, verbose=False)
+    answer = rag_result["answer"]
+    history = rag_result["history_files"]
+    
+    result_row = row.copy()
+    result_row["RAG Answer"] = answer
+    result_row["Retrieved Files"] = "\n".join(history)
+    
+    if has_ground_truth:
+        checklist = row.get("Checklist", "")
+        gt_ref = row.get("Reference Document", "")
+        gt_page = row.get("Page", "")
+        
+        # Evaluate Checklist
+        c_recall, c_precision, c_reason = evaluator.evaluate_checklist(checklist, answer)
+        result_row["Checklist Recall"] = c_recall
+        result_row["Checklist Precision"] = c_precision
+        result_row["Evaluation Reason"] = c_reason
+        
+        # Evaluate References
+        r_recall, r_precision = evaluator.evaluate_references(gt_ref, gt_page, history)
+        result_row["Ref Recall"] = r_recall
+        result_row["Ref Precision"] = r_precision
+        
+        # Simple logging of results (might overlap in output)
+        print(f"[{index+1}] C-Rec: {c_recall:.2f}, C-Prec: {c_precision:.2f} | R-Rec: {r_recall:.2f}, R-Prec: {r_precision:.2f}")
+    
+    return index, result_row
+
 def process_batch_csv(csv_path: str, database_dir: str):
     print(f"Processing Batch CSV: {csv_path}")
     
@@ -299,47 +337,28 @@ def process_batch_csv(csv_path: str, database_dir: str):
     all_files = list_files(database_dir)
     
     evaluator = Evaluator()
-    results = []
+    results = [] # Will store (index, row)
     
-    print(f"Found {len(rows)} questions to process.")
+    print(f"Found {len(rows)} questions to process. Starting parallel execution...")
     
-    for i, row in enumerate(rows):
-        question = row.get("Question")
-        if not question: 
-            continue
+    max_workers = 5
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for i, row in enumerate(rows):
+            futures.append(executor.submit(process_single_row, row, i, len(rows), database_dir, all_files, evaluator, has_ground_truth))
             
-        print(f"\nProcessing {i+1}/{len(rows)}: {question[:50]}...")
-        
-        # Run RAG
-        rag_result = run_rag_session(question, database_dir, all_files, verbose=True) # Set verbose=False for cleaner batch output
-        answer = rag_result["answer"]
-        history = rag_result["history_files"]
-        
-        result_row = row.copy()
-        result_row["RAG Answer"] = answer
-        result_row["Retrieved Files"] = "\n".join(history)
-        
-        if has_ground_truth:
-            checklist = row.get("Checklist", "")
-            gt_ref = row.get("Reference Document", "")
-            gt_page = row.get("Page", "")
-            
-            # Evaluate Checklist
-            c_recall, c_precision, c_reason = evaluator.evaluate_checklist(checklist, answer)
-            result_row["Checklist Recall"] = c_recall
-            result_row["Checklist Precision"] = c_precision
-            result_row["Evaluation Reason"] = c_reason
-            
-            # Evaluate References
-            r_recall, r_precision = evaluator.evaluate_references(gt_ref, gt_page, history)
-            result_row["Ref Recall"] = r_recall
-            result_row["Ref Precision"] = r_precision
-            
-            print(f"  -> C-Recall: {c_recall:.2f}, C-Precision: {c_precision:.2f}")
-            print(f"  -> R-Recall: {r_recall:.2f}, R-Precision: {r_precision:.2f}")
-            
-        results.append(result_row)
-        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                idx, res_row = future.result()
+                if res_row:
+                    results.append((idx, res_row))
+            except Exception as e:
+                print(f"Error processing row: {e}")
+
+    # Sort by original index to maintain order
+    results.sort(key=lambda x: x[0])
+    final_rows = [r[1] for r in results]
+
     # Save output
     output_path = str(Path(csv_path).with_name(f"{Path(csv_path).stem}_results.csv"))
     
@@ -351,7 +370,7 @@ def process_batch_csv(csv_path: str, database_dir: str):
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=output_headers)
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows(final_rows)
         
     print(f"\nBatch processing complete. Results saved to: {output_path}")
 

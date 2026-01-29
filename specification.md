@@ -34,6 +34,9 @@
     - Input CSV can have:
         - `Question` only: Generates answers.
         - `Question`, `Ground Truth`, `Reference Document`, `Page`, `Checklist`: performing RAG and evaluating accuracy.
+    - **Parallel Processing**:
+        - Batch processing runs in parallel to improve speed.
+        - Default max workers: 5 (adjustable in code).
 
 ### Evaluation Metrics
 When Ground Truth is provided, the agent calculates:
