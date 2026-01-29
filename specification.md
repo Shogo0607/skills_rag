@@ -1,4 +1,10 @@
-# Specification
+
+## Specification
+
+### Configuration
+- Environment Variables (.env):
+    - `OPENAI_API_KEY`: Required.
+    - `OPENAI_API_BASE`: Optional. Base URL for the LLM API (e.g. for compatible endpoints).
 
 ## Question Generation
 - When analyzing PDFs, the system generates "Anticipated Questions".

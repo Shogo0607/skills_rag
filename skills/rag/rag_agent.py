@@ -15,14 +15,18 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 
 # Initialize OpenAI client (for RAG part)
-client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = openai.OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY"),
+    base_url=os.environ.get("OPENAI_API_BASE")
+)
 
 # Initialize LangChain models (for PDF Analysis)
 # Centralized configuration for models used in PDF processing
+api_base = os.environ.get("OPENAI_API_BASE")
 pdf_analysis_models = {
-    "vision": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0),
-    "summary": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0),
-    "category": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0).bind(response_format={"type": "json_object"}),
+    "vision": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0, base_url=api_base),
+    "summary": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0, base_url=api_base),
+    "category": ChatOpenAI(model="gpt-4.1-mini", temperature=0.0, base_url=api_base).bind(response_format={"type": "json_object"}),
 }
 
 def list_files(directory):
@@ -164,7 +168,10 @@ def run_rag_session(question: str, database_dir: str, all_files: List[str] = Non
 
 class Evaluator:
     def __init__(self, model_name="gpt-4.1-mini"):
-        self.client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        self.client = openai.OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            base_url=os.environ.get("OPENAI_API_BASE")
+        )
         self.model_name = model_name
 
     def evaluate_checklist(self, checklist_text: str, answer_text: str) -> Tuple[float, float, str]:
