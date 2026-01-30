@@ -105,6 +105,6 @@ Additionally, a **Summary CSV** (`*_summary.csv`) is generated containing the av
     4.  **Copies** the missed file to the new location.
     5.  **Updates** the input CSV: Adds/Updates `Optimized Reference Document` column containing both the original and new paths.
 - **Parallelization**: The analysis of failed cases runs in parallel using `ThreadPoolExecutor`.
-- **Rollback Mechanism**:
-    - During the RL loop (if enabled), if an optimization attempt (file copy) does not result in a successful retrieval (Recall >= 1.0) in the subsequent attempt, the newly created file is automatically deleted.
-    - This prevents the accumulation of ineffective file copies.
+- **Optimization Strategy**:
+    - During the RL loop (if enabled), files are copied to optimized locations.
+    - **Note**: Files created during optimization are **persisted** even if the subsequent attempt fails. This allows for incremental improvement and manual review of "failed" optimizations.

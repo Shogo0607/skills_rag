@@ -493,16 +493,11 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
                 last_created_file = None 
                 break
             
-            # === ROLLBACK LOGIC ===
+            # === ROLLBACK LOGIC REMOVED ===
+            # The user requested to keep files even if optimization fails.
             if last_created_file:
-                print(f"[{index+1}] Optimization check: Recall {or_recall:.2f} < 1.0. Rollback triggered.")
-                if os.path.exists(last_created_file):
-                    try:
-                        os.remove(last_created_file)
-                        print(f"[{index+1}] [ROLLBACK] Deleted ineffective file: {last_created_file}")
-                    except Exception as e:
-                        print(f"[{index+1}] Rollback failed: {e}")
-                last_created_file = None
+                pass 
+            last_created_file = None
             # ======================
 
             if is_last_attempt:
