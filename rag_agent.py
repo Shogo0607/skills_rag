@@ -179,12 +179,12 @@ class Evaluator:
     def evaluate_checklist(self, checklist_text: str, answer_text: str) -> Tuple[float, float, str, int, int, int]:
         """
         Evaluates the answer against the checklist.
-        Returns: (recall, precision, reason, tp, fp, fn)
+        Returns: (recall, precision, reason, tp, fp, fn, tn)
         Recall: % of checklist items found in answer.
         Precision: % of key points in answer that match checklist (approx).
         """
         if not checklist_text or not checklist_text.strip():
-            return 0.0, 0.0, "No checklist provided", 0, 0, 0
+            return 0.0, 0.0, "No checklist provided", 0, 0, 0, 0
 
         prompt = f"""
         あなたは回答の品質評価者です。
@@ -228,11 +228,48 @@ class Evaluator:
                 data.get("reason", ""),
                 data.get("tp", 0),
                 data.get("fp", 0),
-                data.get("fn", 0)
+                data.get("fn", 0),
+                0  # TN is 0 by default for checklist
             )
         except Exception as e:
             print(f"Error in evaluate_checklist: {e}")
-            return 0.0, 0.0, f"Error: {e}", 0, 0, 0
+            return 0.0, 0.0, f"Error: {e}", 0, 0, 0, 0
+
+            return 0.0, 0.0, f"Error: {e}", 0, 0, 0, 0
+
+    def evaluate_refusal(self, answer_text: str) -> Tuple[bool, str]:
+        """
+        Evaluates if the answer correctly refuses to answer due to lack of information.
+        Returns: (is_refusal, reason)
+        """
+        prompt = f"""
+        あなたは回答の評価者です。
+        以下の「回答」が、情報不足などを理由に「回答できない」と述べているかどうかを判定してください。
+        
+        回答:
+        {answer_text}
+        
+        判定基準:
+        - 「参考文献がないため回答できません」「情報が見つかりませんでした」といった趣旨であれば true
+        - 何らかの具体的な回答（推測を含む）を行っている場合は false
+        
+        出力フォーマット (JSON):
+        {{
+            "is_refusal": true,
+            "reason": "回答は明確に情報不足を述べている"
+        }}
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            data = json.loads(response.choices[0].message.content)
+            return data.get("is_refusal", False), data.get("reason", "")
+        except Exception as e:
+            print(f"Error in evaluate_refusal: {e}")
+            return False, f"Error: {e}"
 
     def evaluate_references(self, gt_ref: str, gt_page: str, retrieved_files: List[str], all_files: List[str]) -> Tuple[float, float, float, int, int, int, int]:
         """
@@ -305,6 +342,23 @@ class Evaluator:
             
         return recall, precision, specificity, tp, tn, fp, fn
 
+def calculate_f1(precision, recall):
+    if precision + recall == 0:
+        return 0.0
+    return 2 * (precision * recall) / (precision + recall)
+
+def calculate_accuracy(tp, tn, fp, fn):
+    total = tp + tn + fp + fn
+    if total == 0:
+        return 0.0
+    return (tp + tn) / total
+
+def calculate_specificity(tn, fp):
+    total = tn + fp
+    if total == 0:
+        return "" # N/A
+    return tn / total
+
 def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir: str, all_files: List[str], evaluator: Evaluator, has_ground_truth: bool) -> Tuple[int, Dict[str, Any]]:
     question = row.get("Question")
     if not question:
@@ -326,11 +380,42 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
         gt_ref = row.get("Reference Document", "")
         gt_page = row.get("Page", "")
         
-        # Evaluate Checklist
-        c_recall, c_precision, c_reason, c_tp, c_fp, c_fn = evaluator.evaluate_checklist(checklist, answer)
+        # Determine if we should evaluate as "Answer Generation" or "Refusal"
+        if not gt_ref or not gt_ref.strip():
+            # Case: No Ground Truth Reference -> Should Refuse
+            is_refusal, reason = evaluator.evaluate_refusal(answer)
+            if is_refusal:
+                # TN = 1 (Correct Rejection)
+                c_recall, c_precision = 0.0, 0.0 # N/A
+                c_tp, c_fp, c_fn = 0, 0, 0
+                c_tn = 1
+                c_reason = "No reference provided, and agent correctly refused. (TN)"
+            else:
+                # FP = 1 (Hallucination / Answered when shouldn't)
+                c_recall, c_precision = 0.0, 0.0 
+                c_tp, c_fp, c_fn, c_tn = 0, 1, 0, 0
+                c_reason = "No reference provided, but agent attempted to answer. (FP)"
+        else:
+            # Case: Ground Truth Reference Exists -> Should Answer
+            is_refusal, refusal_reason = evaluator.evaluate_refusal(answer)
+            if is_refusal:
+                # Agent refused but should have answered -> FN
+                # Count FN as 1 (representing "Failed to answer the question")
+                c_recall, c_precision = 0.0, 0.0
+                c_tp, c_fp, c_tn = 0, 0, 0
+                c_fn = 1 
+                c_reason = f"Reference exists, but agent refused: {refusal_reason} (FN)"
+            else:
+                # Normal Checklist Evaluation
+                c_recall, c_precision, c_reason, c_tp, c_fp, c_fn, c_tn = evaluator.evaluate_checklist(checklist, answer)
+        
         result_row["Checklist Recall"] = c_recall
         result_row["Checklist Precision"] = c_precision
+        result_row["Checklist F1"] = calculate_f1(c_precision, c_recall)
+        result_row["Checklist Accuracy"] = calculate_accuracy(c_tp, c_tn, c_fp, c_fn)
+        result_row["Checklist Specificity"] = calculate_specificity(c_tn, c_fp)
         result_row["Checklist TP"] = c_tp
+        result_row["Checklist TN"] = c_tn
         result_row["Checklist FP"] = c_fp
         result_row["Checklist FN"] = c_fn
         result_row["Evaluation Reason"] = c_reason
@@ -340,6 +425,8 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
         result_row["Ref Recall"] = r_recall
         result_row["Ref Precision"] = r_precision
         result_row["Ref Specificity"] = r_specificity
+        result_row["Ref F1"] = calculate_f1(r_precision, r_recall)
+        result_row["Ref Accuracy"] = calculate_accuracy(r_tp, r_tn, r_fp, r_fn)
         result_row["Ref TP"] = r_tp
         result_row["Ref TN"] = r_tn
         result_row["Ref FP"] = r_fp
@@ -352,15 +439,17 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
             result_row["Opt Ref Recall"] = or_recall
             result_row["Opt Ref Precision"] = or_precision
             result_row["Opt Ref Specificity"] = or_specificity
+            result_row["Opt Ref F1"] = calculate_f1(or_precision, or_recall)
+            result_row["Opt Ref Accuracy"] = calculate_accuracy(or_tp, or_tn, or_fp, or_fn)
             result_row["Opt Ref TP"] = or_tp
             result_row["Opt Ref TN"] = or_tn
             result_row["Opt Ref FP"] = or_fp
             result_row["Opt Ref FN"] = or_fn
             
-            print(f"[{index+1}] Checklist(R/P): {c_recall:.2f}/{c_precision:.2f} | Ref(R/P/S): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f} | OptRef(R/P/S): {or_recall:.2f}/{or_precision:.2f}/{or_specificity:.2f}")
+            print(f"[{index+1}] Checklist(R/P/F1): {c_recall:.2f}/{c_precision:.2f}/{result_row['Checklist F1']:.2f} | Ref(R/P/S/F1): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}/{result_row['Ref F1']:.2f}")
         else:
             # Simple logging of results (might overlap in output)
-            print(f"[{index+1}] Checklist(R/P): {c_recall:.2f}/{c_precision:.2f} | Ref(R/P/S): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}")
+            print(f"[{index+1}] Checklist(R/P/F1): {c_recall:.2f}/{c_precision:.2f}/{result_row['Checklist F1']:.2f} | Ref(R/P/S/F1): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}/{result_row['Ref F1']:.2f}")
     
     return index, result_row
 
@@ -414,12 +503,13 @@ def process_batch_csv(csv_path: str, database_dir: str):
     if has_ground_truth:
         if "Optimized Reference Document" in rows[0]:
              output_headers += [
-                "Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref TP", "Opt Ref TN", "Opt Ref FP", "Opt Ref FN"
+                "Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref F1", "Opt Ref Accuracy", "Opt Ref TP", "Opt Ref TN", "Opt Ref FP", "Opt Ref FN"
              ]
         
+                
         output_headers += [
-            "Checklist Recall", "Checklist Precision", "Checklist TP", "Checklist FP", "Checklist FN", "Evaluation Reason",
-            "Ref Recall", "Ref Precision", "Ref Specificity", "Ref TP", "Ref TN", "Ref FP", "Ref FN"
+            "Checklist Recall", "Checklist Precision", "Checklist F1", "Checklist Accuracy", "Checklist Specificity", "Checklist TP", "Checklist TN", "Checklist FP", "Checklist FN", "Evaluation Reason",
+            "Ref Recall", "Ref Precision", "Ref Specificity", "Ref F1", "Ref Accuracy", "Ref TP", "Ref TN", "Ref FP", "Ref FN"
         ]
         
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
@@ -428,6 +518,36 @@ def process_batch_csv(csv_path: str, database_dir: str):
         writer.writerows(final_rows)
         
     print(f"\nBatch processing complete. Results saved to: {output_path}")
+
+    # Generate Summary CSV
+    if has_ground_truth:
+        summary_metrics = [
+            "Checklist Recall", "Checklist Precision", "Checklist F1", "Checklist Accuracy", "Checklist Specificity",
+            "Ref Recall", "Ref Precision", "Ref Specificity", "Ref F1", "Ref Accuracy"
+        ]
+        if "Opt Ref Recall" in final_rows[0]:
+             summary_metrics += ["Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref F1", "Opt Ref Accuracy"]
+
+        summary_data = {}
+        count = len(final_rows)
+        
+        if count > 0:
+            for metric in summary_metrics:
+                # Calculate mean, ignoring None or empty strings
+                values = [float(row.get(metric, 0)) for row in final_rows if row.get(metric) not in (None, "")]
+                if values:
+                    summary_data[metric] = sum(values) / len(values)
+                else:
+                    summary_data[metric] = 0.0
+            
+            summary_output_path = str(Path(csv_path).with_name(f"{Path(csv_path).stem}_summary.csv"))
+            
+            with open(summary_output_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=summary_metrics)
+                writer.writeheader()
+                writer.writerow(summary_data)
+                
+            print(f"Summary saved to: {summary_output_path}")
 
     # Run Folder Optimization if Ground Truth was present
     if has_ground_truth:

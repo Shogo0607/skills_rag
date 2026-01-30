@@ -40,24 +40,40 @@
         - Default max workers: 5 (adjustable in code).
 
 ### Evaluation Metrics
+
+    
+    
+### Evaluation Metrics
 When Ground Truth is provided, the agent calculates the following.
 The results are saved to the CSV with detailed counts (TP, TN, FP, FN).
+Additionally, a **Summary CSV** (`*_summary.csv`) is generated containing the average of these metrics.
 
 1.  **Checklist Verification**:
     - **Recall**: Percentage of checklist items present in the RAG answer.
     - **Precision**: Percentage of key points in the RAG answer that match the checklist.
-    - **Specificity**: (N/A for Checklist usually, or calculated if applicable).
+    - **Precision**: Percentage of key points in the RAG answer that match the checklist.
+    - **F1 Score**: Harmonic mean of Precision and Recall.
+    - **Accuracy**: (TP + TN) / Total.
+    - **Specificity**: 
+        - Formula: TN / (TN + FP)
+        - Note: If TN+FP=0, it is undefined (empty string in CSV).
     - **Counts**:
         - **TP**: Number of checklist items found in the answer.
         - **FP**: Number of keys points in answer NOT in checklist.
         - **FN**: Number of checklist items NOT found in answer.
-        - **TN**: (N/A)
+        - **TN**: 
+            - **1** if Ground Truth Reference is empty AND Agent correctly refuses to answer ("I cannot answer...").
+            - **0** otherwise.
+            - If Reference is empty but Agent answers: **FP=1**, TN=0.
+            - If Reference exists but Agent refuses: **FN=1** (or count of missed items), TP=0.
 
 2.  **Reference Verification**:
     - **Recall**: Percentage of Ground Truth pages that were correctly retrieved.
     - **Precision**: Percentage of retrieved pages that match the Ground Truth pages.
     - **Specificity**: Percentage of irrelevant pages that were correctly NOT retrieved.
         - Formula: TN / (TN + FP)
+    - **F1 Score**: Harmonic mean of Precision and Recall.
+    - **Accuracy**: (TP + TN) / Total files.
     - **Counts**:
         - **TP** (True Positive): Relevant pages retrieved.
         - **TN** (True Negative): Irrelevant pages NOT retrieved.
