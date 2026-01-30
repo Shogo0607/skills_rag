@@ -18,7 +18,9 @@
         - Format: Bulleted list or newlines in the CSV cell.
 
 ## Output Format
-- Output: `database/subdirectory/想定質問/想定質問.csv` (encoding: `utf-8-sig`)
+- Output: `results/input_filename_results_YYYYMMDD_HHMMSS.csv` (encoding: `utf-8-sig`)
+    - All output folders and files are timestamped to avoid overwriting.
+    - Creates `results/` directory if it does not exist.
 - Columns: `Question`, `Ground Truth`, `Reference Document`, `Page`, `Checklist`
     - Evaluation columns added: `RAG Answer`, `Retrieved Files`, `Checklist Recall`, `Checklist Precision`, `Checklist TP`, `Checklist FP`, `Checklist FN`, `Ref Recall`, `Ref Precision`, `Ref Specificity`, `Ref TP`, `Ref TN`, `Ref FP`, `Ref FN`, `Evaluation Reason`
 - **Reference Document Format**:
@@ -38,6 +40,10 @@
     - **Parallel Processing**:
         - Batch processing runs in parallel to improve speed.
         - Default max workers: 5 (adjustable in code).
+    - **Optional RL Loop**:
+        - Usage: `python rag_agent.py input.csv --enable-rl`
+        - Enables the folder optimization reinforcement learning loop (up to 5 attempts per question).
+        - If disabled (default), the agent runs only once per question.
 
 ### Evaluation Metrics
 
@@ -99,3 +105,6 @@ Additionally, a **Summary CSV** (`*_summary.csv`) is generated containing the av
     4.  **Copies** the missed file to the new location.
     5.  **Updates** the input CSV: Adds/Updates `Optimized Reference Document` column containing both the original and new paths.
 - **Parallelization**: The analysis of failed cases runs in parallel using `ThreadPoolExecutor`.
+- **Rollback Mechanism**:
+    - During the RL loop (if enabled), if an optimization attempt (file copy) does not result in a successful retrieval (Recall >= 1.0) in the subsequent attempt, the newly created file is automatically deleted.
+    - This prevents the accumulation of ineffective file copies.

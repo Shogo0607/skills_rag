@@ -359,83 +359,120 @@ def calculate_specificity(tn, fp):
         return "" # N/A
     return tn / total
 
-def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir: str, all_files: List[str], evaluator: Evaluator, has_ground_truth: bool) -> Tuple[int, Dict[str, Any]]:
+import shutil
+
+def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir: str, all_files: List[str], evaluator: Evaluator, has_ground_truth: bool, enable_rl: bool = False) -> Tuple[int, Dict[str, Any]]:
     question = row.get("Question")
     if not question:
         return index, None
         
     print(f"Processing {index+1}/{total} (Thread): {question[:30]}...")
     
-    # Run RAG (verbose=False to avoid log interleaving)
-    rag_result = run_rag_session(question, database_dir, all_files, verbose=False)
-    answer = rag_result["answer"]
-    history = rag_result["history_files"]
+    # Initialize Optimizer
+    optimizer = FolderOptimizer(database_dir)
+    attempt_history = []
+    # Set max_retries based on enable_rl flag
+    max_retries = 5 if enable_rl else 1
     
-    result_row = row.copy()
-    result_row["RAG Answer"] = answer
-    result_row["Retrieved Files"] = "\n".join(history)
+    final_result_row = None
+    last_created_file = None  # Track file created in previous attempt for rollback
     
-    if has_ground_truth:
-        checklist = row.get("Checklist", "")
+    for attempt in range(max_retries):
+        is_last_attempt = (attempt == max_retries - 1)
+        if attempt > 0:
+            print(f"[{index+1}] Retry Attempt {attempt+1}/{max_retries} for: {question[:30]}...")
+            # Re-index files because we might have added new ones
+            all_files = list_files(database_dir)
+        
+        # Run RAG (verbose=False to avoid log interleaving)
+        rag_result = run_rag_session(question, database_dir, all_files, verbose=False)
+        answer = rag_result["answer"]
+        history = rag_result["history_files"]
+        
+        result_row = row.copy()
+        result_row["RAG Answer"] = answer
+        result_row["Retrieved Files"] = "\n".join(history)
+        result_row["Max Attempts"] = attempt + 1
+        
+        # Current 'Optimized Reference Document' state
         gt_ref = row.get("Reference Document", "")
         gt_page = row.get("Page", "")
         
-        # Determine if we should evaluate as "Answer Generation" or "Refusal"
-        if not gt_ref or not gt_ref.strip():
-            # Case: No Ground Truth Reference -> Should Refuse
-            is_refusal, reason = evaluator.evaluate_refusal(answer)
-            if is_refusal:
-                # TN = 1 (Correct Rejection)
-                c_recall, c_precision = 0.0, 0.0 # N/A
-                c_tp, c_fp, c_fn = 0, 0, 0
-                c_tn = 1
-                c_reason = "No reference provided, and agent correctly refused. (TN)"
+        current_opt_refs = set()
+        # Add original GTs
+        for r in gt_ref.split('\n'):
+             if r.strip(): current_opt_refs.add(r.strip())
+        
+        # Add suggestion history paths
+        for h in attempt_history:
+            if h.get("suggested_path"):
+                current_opt_refs.add(h.get("suggested_path"))
+        
+        effective_gt_lines = []
+        for line in gt_ref.split('\n'):
+            line = line.strip()
+            if not line: continue
+            # Gather all aliases for this line
+            current_aliases = set(a.strip() for a in line.split('|') if a.strip())
+            # Add any suggestion that maps to one of these
+            for h in attempt_history:
+                if h.get("original_path") in current_aliases:
+                    current_aliases.add(h.get("suggested_path"))
+            effective_gt_lines.append("|".join(sorted(list(current_aliases))))
+        
+        effective_gt_str = "\n".join(effective_gt_lines)
+        
+        if has_ground_truth:
+            checklist = row.get("Checklist", "")
+            
+            # ... (Checklist evaluation omitted for brevity, logic unchanged) ...
+            
+            # Determine if we should evaluate as "Answer Generation" or "Refusal"
+            if not gt_ref or not gt_ref.strip():
+                is_refusal, reason = evaluator.evaluate_refusal(answer)
+                if is_refusal:
+                    c_recall, c_precision = 0.0, 0.0
+                    c_tp, c_fp, c_fn, c_tn = 0, 0, 0, 1
+                    c_reason = "No reference provided, and agent correctly refused. (TN)"
+                else:
+                    c_recall, c_precision = 0.0, 0.0
+                    c_tp, c_fp, c_fn, c_tn = 0, 1, 0, 0
+                    c_reason = "No reference provided, but agent attempted to answer. (FP)"
             else:
-                # FP = 1 (Hallucination / Answered when shouldn't)
-                c_recall, c_precision = 0.0, 0.0 
-                c_tp, c_fp, c_fn, c_tn = 0, 1, 0, 0
-                c_reason = "No reference provided, but agent attempted to answer. (FP)"
-        else:
-            # Case: Ground Truth Reference Exists -> Should Answer
-            is_refusal, refusal_reason = evaluator.evaluate_refusal(answer)
-            if is_refusal:
-                # Agent refused but should have answered -> FN
-                # Count FN as 1 (representing "Failed to answer the question")
-                c_recall, c_precision = 0.0, 0.0
-                c_tp, c_fp, c_tn = 0, 0, 0
-                c_fn = 1 
-                c_reason = f"Reference exists, but agent refused: {refusal_reason} (FN)"
-            else:
-                # Normal Checklist Evaluation
-                c_recall, c_precision, c_reason, c_tp, c_fp, c_fn, c_tn = evaluator.evaluate_checklist(checklist, answer)
-        
-        result_row["Checklist Recall"] = c_recall
-        result_row["Checklist Precision"] = c_precision
-        result_row["Checklist F1"] = calculate_f1(c_precision, c_recall)
-        result_row["Checklist Accuracy"] = calculate_accuracy(c_tp, c_tn, c_fp, c_fn)
-        result_row["Checklist Specificity"] = calculate_specificity(c_tn, c_fp)
-        result_row["Checklist TP"] = c_tp
-        result_row["Checklist TN"] = c_tn
-        result_row["Checklist FP"] = c_fp
-        result_row["Checklist FN"] = c_fn
-        result_row["Evaluation Reason"] = c_reason
-        
-        # Evaluate References
-        r_recall, r_precision, r_specificity, r_tp, r_tn, r_fp, r_fn = evaluator.evaluate_references(gt_ref, gt_page, history, all_files)
-        result_row["Ref Recall"] = r_recall
-        result_row["Ref Precision"] = r_precision
-        result_row["Ref Specificity"] = r_specificity
-        result_row["Ref F1"] = calculate_f1(r_precision, r_recall)
-        result_row["Ref Accuracy"] = calculate_accuracy(r_tp, r_tn, r_fp, r_fn)
-        result_row["Ref TP"] = r_tp
-        result_row["Ref TN"] = r_tn
-        result_row["Ref FP"] = r_fp
-        result_row["Ref FN"] = r_fn
-        
-        # Evaluate Optimized References if present
-        opt_ref = row.get("Optimized Reference Document", "")
-        if opt_ref:
-            or_recall, or_precision, or_specificity, or_tp, or_tn, or_fp, or_fn = evaluator.evaluate_references(opt_ref, gt_page, history, all_files)
+                is_refusal, refusal_reason = evaluator.evaluate_refusal(answer)
+                if is_refusal:
+                    c_recall, c_precision = 0.0, 0.0
+                    c_tp, c_fp, c_tn = 0, 0, 0
+                    c_fn = 1 
+                    c_reason = f"Reference exists, but agent refused: {refusal_reason} (FN)"
+                else:
+                    c_recall, c_precision, c_reason, c_tp, c_fp, c_fn, c_tn = evaluator.evaluate_checklist(checklist, answer)
+            
+            result_row["Checklist Recall"] = c_recall
+            result_row["Checklist Precision"] = c_precision
+            result_row["Checklist F1"] = calculate_f1(c_precision, c_recall)
+            result_row["Checklist Accuracy"] = calculate_accuracy(c_tp, c_tn, c_fp, c_fn)
+            result_row["Checklist Specificity"] = calculate_specificity(c_tn, c_fp)
+            result_row["Checklist TP"] = c_tp
+            result_row["Checklist TN"] = c_tn
+            result_row["Checklist FP"] = c_fp
+            result_row["Checklist FN"] = c_fn
+            result_row["Evaluation Reason"] = c_reason
+            
+            # Evaluate References (Against Original GT)
+            r_recall, r_precision, r_specificity, r_tp, r_tn, r_fp, r_fn = evaluator.evaluate_references(gt_ref, gt_page, history, all_files)
+            result_row["Ref Recall"] = r_recall
+            result_row["Ref Precision"] = r_precision
+            result_row["Ref Specificity"] = r_specificity
+            result_row["Ref F1"] = calculate_f1(r_precision, r_recall)
+            result_row["Ref Accuracy"] = calculate_accuracy(r_tp, r_tn, r_fp, r_fn)
+            result_row["Ref TP"] = r_tp
+            result_row["Ref TN"] = r_tn
+            result_row["Ref FP"] = r_fp
+            result_row["Ref FN"] = r_fn
+
+            # Evaluate Optimized References
+            or_recall, or_precision, or_specificity, or_tp, or_tn, or_fp, or_fn = evaluator.evaluate_references(effective_gt_str, gt_page, history, all_files)
             result_row["Opt Ref Recall"] = or_recall
             result_row["Opt Ref Precision"] = or_precision
             result_row["Opt Ref Specificity"] = or_specificity
@@ -446,15 +483,96 @@ def process_single_row(row: Dict[str, Any], index: int, total: int, database_dir
             result_row["Opt Ref FP"] = or_fp
             result_row["Opt Ref FN"] = or_fn
             
-            print(f"[{index+1}] Checklist(R/P/F1): {c_recall:.2f}/{c_precision:.2f}/{result_row['Checklist F1']:.2f} | Ref(R/P/S/F1): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}/{result_row['Ref F1']:.2f}")
-        else:
-            # Simple logging of results (might overlap in output)
-            print(f"[{index+1}] Checklist(R/P/F1): {c_recall:.2f}/{c_precision:.2f}/{result_row['Checklist F1']:.2f} | Ref(R/P/S/F1): {r_recall:.2f}/{r_precision:.2f}/{r_specificity:.2f}/{result_row['Ref F1']:.2f}")
-    
-    return index, result_row
+            result_row["Optimized Reference Document"] = effective_gt_str
 
-def process_batch_csv(csv_path: str, database_dir: str):
-    print(f"Processing Batch CSV: {csv_path}")
+            final_result_row = result_row
+            
+            # Check for success (Perfect Recall) or Max Attempts
+            if or_recall >= 1.0:
+                print(f"[{index+1}] Success on attempt {attempt+1}!")
+                last_created_file = None 
+                break
+            
+            # === ROLLBACK LOGIC ===
+            if last_created_file:
+                print(f"[{index+1}] Optimization check: Recall {or_recall:.2f} < 1.0. Rollback triggered.")
+                if os.path.exists(last_created_file):
+                    try:
+                        os.remove(last_created_file)
+                        print(f"[{index+1}] [ROLLBACK] Deleted ineffective file: {last_created_file}")
+                    except Exception as e:
+                        print(f"[{index+1}] Rollback failed: {e}")
+                last_created_file = None
+            # ======================
+
+            if is_last_attempt:
+                print(f"[{index+1}] Max attempts reached (RL Enabled={enable_rl}). Final Recall: {or_recall:.2f}")
+                break
+            else:
+                # RL Step: Optimize
+                gt_targets = []
+                for line in gt_ref.split('\n'):
+                     if line.strip(): gt_targets.append(line.strip())
+                
+                missed_files = []
+                for target_line in gt_targets:
+                    target_aliases = set(a.strip() for a in target_line.split('|') if a.strip())
+                    for h in attempt_history:
+                        if h.get("original_path") in target_aliases:
+                             target_aliases.add(h.get("suggested_path"))
+                    
+                    found = False
+                    for h_file in history:
+                        for alias in target_aliases:
+                            if h_file.endswith(alias) or alias.endswith(h_file):
+                                found = True
+                                break
+                        if found: break
+                    
+                    if not found:
+                        original_path = target_line.split('|')[0].strip()
+                        missed_files.append(original_path)
+                
+                suggestion_found = False
+                for missed_file in missed_files:
+                    print(f"[{index+1}] Optimization triggered for: {missed_file}")
+                    suggestion = optimizer.optimize_single_file(missed_file, question, attempt_history)
+                    if suggestion:
+                        # Copy File
+                        orig = suggestion["original_path"]
+                        new_p = suggestion["suggested_path"]
+                        
+                        abs_orig = os.path.abspath(orig)
+                        abs_new = os.path.abspath(new_p)
+                        
+                        if os.path.exists(abs_orig) and not os.path.exists(abs_new):
+                            try:
+                                os.makedirs(os.path.dirname(abs_new), exist_ok=True)
+                                shutil.copy2(abs_orig, abs_new)
+                                print(f"[{index+1}] [COPIED] {orig} -> {new_p}")
+                                attempt_history.append(suggestion)
+                                suggestion_found = True
+                                last_created_file = abs_new # Track for rollback
+                            except Exception as e:
+                                print(f"[{index+1}] Copy failed: {e}")
+                        elif os.path.exists(abs_new):
+                            print(f"[{index+1}] Target already exists: {new_p}")
+                            attempt_history.append(suggestion)
+                            suggestion_found = True
+                            
+                if not suggestion_found:
+                    print(f"[{index+1}] No usage suggestions found. Stopping loop.")
+                    break
+        else:
+            final_result_row = result_row
+            break
+
+    return index, final_result_row
+
+from datetime import datetime
+
+def process_batch_csv(csv_path: str, database_dir: str, enable_rl: bool = False):
+    print(f"Processing Batch CSV: {csv_path} (RL Enabled: {enable_rl})")
     
     with open(csv_path, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
@@ -481,7 +599,7 @@ def process_batch_csv(csv_path: str, database_dir: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for i, row in enumerate(rows):
-            futures.append(executor.submit(process_single_row, row, i, len(rows), database_dir, all_files, evaluator, has_ground_truth))
+            futures.append(executor.submit(process_single_row, row, i, len(rows), database_dir, all_files, evaluator, has_ground_truth, enable_rl))
             
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -496,17 +614,26 @@ def process_batch_csv(csv_path: str, database_dir: str):
     final_rows = [r[1] for r in results]
 
     # Save output
-    output_path = str(Path(csv_path).with_name(f"{Path(csv_path).stem}_results.csv"))
+    # Structure Output Directory
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_stem = Path(csv_path).stem
+    
+    output_filename = f"{csv_stem}_results_{timestamp}.csv"
+    output_path = os.path.join(results_dir, output_filename)
     
     # Determine new headers
-    output_headers = list(rows[0].keys()) + ["RAG Answer", "Retrieved Files"]
+    output_headers = list(rows[0].keys()) + ["RAG Answer", "Retrieved Files", "Max Attempts"]
     if has_ground_truth:
-        if "Optimized Reference Document" in rows[0]:
-             output_headers += [
-                "Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref F1", "Opt Ref Accuracy", "Opt Ref TP", "Opt Ref TN", "Opt Ref FP", "Opt Ref FN"
-             ]
+        # Always add Optimized Reference columns if we have ground truth, 
+        # because the RL loop generates them.
+        output_headers += [
+            "Optimized Reference Document",
+            "Opt Ref Recall", "Opt Ref Precision", "Opt Ref Specificity", "Opt Ref F1", "Opt Ref Accuracy", "Opt Ref TP", "Opt Ref TN", "Opt Ref FP", "Opt Ref FN"
+        ]
         
-                
         output_headers += [
             "Checklist Recall", "Checklist Precision", "Checklist F1", "Checklist Accuracy", "Checklist Specificity", "Checklist TP", "Checklist TN", "Checklist FP", "Checklist FN", "Evaluation Reason",
             "Ref Recall", "Ref Precision", "Ref Specificity", "Ref F1", "Ref Accuracy", "Ref TP", "Ref TN", "Ref FP", "Ref FN"
@@ -540,7 +667,8 @@ def process_batch_csv(csv_path: str, database_dir: str):
                 else:
                     summary_data[metric] = 0.0
             
-            summary_output_path = str(Path(csv_path).with_name(f"{Path(csv_path).stem}_summary.csv"))
+            summary_output_filename = f"{csv_stem}_summary_{timestamp}.csv"
+            summary_output_path = os.path.join(results_dir, summary_output_filename)
             
             with open(summary_output_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.DictWriter(f, fieldnames=summary_metrics)
@@ -557,20 +685,23 @@ def process_batch_csv(csv_path: str, database_dir: str):
         except Exception as e:
             print(f"Warning: Folder optimization failed: {e}")
 
+import argparse
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  Single Mode: python rag_agent.py \"Question\" [subdirectory]")
-        print("  Batch Mode:  python rag_agent.py input.csv [subdirectory]")
-        sys.exit(1)
-        
-    arg1 = sys.argv[1]
+    parser = argparse.ArgumentParser(description="RAG Agent")
+    parser.add_argument("input", help="Question string or path to CSV file")
+    parser.add_argument("subdir", nargs="?", default="", help="Subdirectory in database")
+    parser.add_argument("--enable-rl", action="store_true", help="Enable Reinforcement Learning loop for folder optimization")
+    
+    args = parser.parse_args()
+    
+    arg1 = args.input
+    target_subdir = args.subdir
+    enable_rl = args.enable_rl
     
     # Determine Database Directory
     base_database_dir = "database"
-    if len(sys.argv) > 2:
-        # Check if arg2 is a subdirectory or part of database path
-        target_subdir = sys.argv[2]
+    if target_subdir:
         database_dir = os.path.join(base_database_dir, target_subdir)
     else:
         database_dir = base_database_dir
@@ -592,7 +723,7 @@ def main():
         if not os.path.exists(arg1):
              print(f"Error: CSV file '{arg1}' not found.")
              sys.exit(1)
-        process_batch_csv(arg1, database_dir)
+        process_batch_csv(arg1, database_dir, enable_rl=enable_rl)
     else:
         # Single Question Mode
         run_rag_session(arg1, database_dir)

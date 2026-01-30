@@ -190,6 +190,88 @@ class FolderOptimizer:
             print(f"Error in LLM analysis: {e}")
             return None
 
+    def optimize_single_file(self, file_path: str, question: str, attempt_history: List[Dict]) -> Dict:
+        """
+        Analyzes a single failure case with history to avoid local optima.
+        used in the RL loop.
+        """
+        # Get existing folders
+        existing_structure = self._get_directory_structure()
+        
+        history_text = ""
+        if attempt_history:
+            history_text = "過去の試行と失敗理由:\n"
+            for i, attempt in enumerate(attempt_history):
+                history_text += f"試行 {i+1}:\n"
+                history_text += f"  - 提案パス: {attempt.get('suggested_path')}\n"
+                history_text += f"  - 理由: {attempt.get('reason')}\n"
+                history_text += f"  - 結果: 失敗 (Recall < 1.0)\n"
+        
+        prompt = f"""
+        あなたはRAGシステムのデータベース管理者です。
+        以下のドキュメントファイルは、ユーザーの質問に対して正解の情報源であるにもかかわらず、RAGエージェントによって検索されませんでした。
+        
+        これまでの試行錯誤の結果（もしあれば）を踏まえ、このファイルが確実に発見されるような、新しいフォルダ構造・ファイルパスを提案してください。
+        特に、過去に失敗したアプローチとは異なる観点（例：キーワードベースがだめならタスクベース、機能ベースなど）で提案してください。
+
+        対象ファイルパス (Current Path):
+        {file_path}
+
+        検索に失敗した質問:
+        "{question}"
+        
+        {history_text}
+        
+        現在の作業スコープ (Database Directory):
+        {self.database_dir}
+        
+        現在のスコープ内の既存フォルダ構成:
+        {existing_structure}
+
+        タスク:
+        質問に対して、このファイルがより自然に発見されるような、新しいフォルダ構造・ファイルパスを提案してください。
+        
+        制約:
+        1. 必ず "{self.database_dir}" (またはそのサブディレクトリ) で始まるパスにしてください。
+        2. **既存のフォルダ構成を考慮してください。**
+           - まず、既存のフォルダの中に、質問の意図に合致する「最適なフォルダ」が存在しないか確認してください。
+           - 既存のフォルダでは分類が不十分な場合のみ、新しいフォルダを作成してください。
+        3. ファイル名自体 (.md) は変更せず、ディレクトリ部分を改善してください。
+        4. 過去の試行と同じパスは絶対に提案しないでください。局所解を避けてください。
+        5. どうしても良い改善案がない場合は null を返してください。
+
+        出力フォーマット (JSON):
+        {{
+            "original_path": "{file_path}",
+            "suggested_path": "{self.database_dir}/new_subcategory/filename.md",
+            "reason": "前回は意味的な分類を試みたが失敗したため、今回は具体的なエラーコードに基づくフォルダに配置する。"
+        }}
+        """
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
+            data = json.loads(content)
+            
+            new_path = data.get("suggested_path")
+            
+            # Validation
+            if new_path and new_path != file_path and new_path.startswith(self.database_dir):
+                # Check history to avoid repeats
+                for attempt in attempt_history:
+                    if attempt.get("suggested_path") == new_path:
+                        print(f"Skipping repeat suggestion: {new_path}")
+                        return None
+                return data
+            return None
+        except Exception as e:
+            print(f"Error in optimize_single_file: {e}")
+            return None
+
     def _apply_suggestions(self, suggestions: List[Dict]):
         if not suggestions:
             print("No structure improvements suggested.")
